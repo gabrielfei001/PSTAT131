@@ -1,0 +1,398 @@
+---
+title: "PSTAT131 Final Project"
+author: "Gabriel Fei"
+date: "12/4/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+```{r library-loading, echo = FALSE, message = FALSE, warning = FALSE}
+library(tidyverse)
+library(ISLR)
+library(glmnet)
+library(tree)
+library(maptree)
+library(randomForest)
+# install.packages("gbm")
+library(gbm)
+library(ROCR)
+library(ggridges)
+# install.packages("dendextend")
+library(dendextend)
+library(readr)
+# install.packages("maps")
+library(maps)
+```
+
+### Census Data 
+
+We essentially start with the 2017 United States county-level census data, which is available here. This dataset contains many demographic variables for each county in the U.S.
+
+We load in and clean the census dataset by transforming the full state names to abbreviations (to match the education dataset in later steps). Specifically, R contains default global variables state.name and state.abb that store the full names and the associated abbreviations of the 50 states. However, it does not contain District of Columbia (and the associated DC). We added it back manually since census contains information in DC. We further remove data from Purto Rico to ease the visualization in later steps.
+
+Followings are the first few rows of the census data. The column names are all very self-explanatory:
+```{r census-loading-data, message = FALSE}
+state.name <- c(state.name, "District of Columbia")
+state.abb <- c(state.abb, "DC")
+## read in census data
+census <- read_csv("./acs2017_county_data.csv") %>% select(-CountyId, -ChildPoverty, -Income, -IncomeErr, -IncomePerCap, -IncomePerCapErr) %>%
+  mutate(State = state.abb[match(`State`, state.name)]) %>%
+  filter(State != "PR")
+head(census)
+```
+
+### Education Data
+
+We also include the education dataset, available at Economic Research Service at USDA. The dataset contains county-level educational attainment for adults age 25 and older in 1970-2019. We specifically use educational attainment information for the time period of 2015-2019.
+
+To clean the data, we remove uninformative columns (as in FIPS Code, 2003 Rural-urban Continuum Code, 2003 Urban Influence Code, 2013 Rural-urban Continuum Code, and 2013 Urban Influence Code). To be consistent with census data, we exclude data from Purto Rico and we rename Area name to County in order to match that in the census dataset.
+
+```{r education-loading-data, message = FALSE}
+## read in education data
+education <- read_csv("./Education.csv") %>%
+  filter(!is.na(`2003 Rural-urban Continuum Code`)) %>%
+  filter(State != "PR") %>%
+  select(-`FIPS Code`,
+         -`2003 Rural-urban Continuum Code`,
+         -`2003 Urban Influence Code`,
+         -`2013 Rural-urban Continuum Code`,
+         -`2013 Urban Influence Code`) %>%
+  rename(County = `Area name`)
+```
+
+### Preliminary Data Analysis
+
+**1.** 
+
+```{r 1}
+cat("Dimensions of Census: ", dim(census), "\n") # Checking dimensions of census
+cat("Are there any missing values in Census? ", any(is.na(census)), "\n") # Checking for missing values in census
+cat("Number of unique values in State:", length(unique(census$State)), "\n") # Checking number of unique values in census$State
+```
+The dimension of $census$ is 3142 x 31. There aren't any missing values in the data set. The number of unique values in $State$ in $census$ does match all the states (that is there are 50 states) and a federal district (hence 51 values).
+
+**2.**
+
+```{r 2}
+cat("Dimensions of Education: ", dim(education), "\n") # Checking dimensions of education
+cat("Are there any missing values in Education?", any(is.na(unique(education$County))), "\n") # Checking for missing values in distinct education$Country
+cat("Number of unique values in County in Education:", length(unique(education$County)), "\n") # Checking number of unique values in education$Country
+cat("Number of unique values in County in Census:", length(unique(census$County)), "\n") # Checking number of unique values in census$Country
+```
+The dimension of $education$ is 3143 x 42. There are no distinct counties that contain missing values in this data set. There's a total number of 1877 distinct values in $County$ in $education$. The number of distinct values in $County$ in $census$ is also 1877 which is the same as the total number of distinct values in $County$ in $education$. It seems as though we have the same Counties represented in the Census and Education data set so we can probably merge them together later.
+
+### Data wrangling
+
+**3.**
+```{r 3}
+cat("Are there any missing values in Education?", any(is.na(education)), "\n") # Checking to see if there are any NA values in education
+education = drop_na(education) # Dropping missing values in education
+cat("Rechecking dimensions of Education: ", dim(education), "\n") # Rechecking dimensions of education after dropping all NA values
+```
+First we check to see if there are any missing values in the education data. Since there are missing values, we will remove them. We dropped a total of 18 observations which had missing values.
+
+**4.**
+
+In education, in addition to State and County, we will start only on the following 4 features: Less than a high school diploma, 2015-19, High school diploma only, 2015-19, Some college or associate's degree, 2015-19, and Bachelor's degree or higher, 2015-19. Mutate the education dataset by selecting these 6 features only, and create a new feature which is the total population of that county. The first few rows are shown below.
+```{r 4}
+education = education %>% 
+  select("State", "County", "Less than a high school diploma, 2015-19", "High school diploma only, 2015-19", "Some college or associate's degree, 2015-19", "Bachelor's degree or higher, 2015-19")
+# Create new column that takes total population of new education set
+education = mutate(education, total_pop = apply(education[3:6], FUN = sum, MARGIN = 1)) 
+head(education)
+```
+
+**5.**
+
+We now construct aggregated data sets from the education data, we created one based on aggregated State education called education.state and one based on aggregated County education called education.county. And the first few rows are shown below.
+```{r 5}
+# Create dataset based on aggregated State education
+education.state = education %>%
+  select("Less than a high school diploma, 2015-19", "High school diploma only, 2015-19", "Some college or associate's degree, 2015-19", "Bachelor's degree or higher, 2015-19") %>%
+  aggregate(by = list(State = education$State), FUN = sum)
+head(education.state)
+# Create dataset based on aggregated County education
+education.county = education %>%
+  select("Less than a high school diploma, 2015-19", "High school diploma only, 2015-19", "Some college or associate's degree, 2015-19", "Bachelor's degree or higher, 2015-19") %>%
+  aggregate(by = list(County = education$County), FUN = sum)
+head(education.county)
+```
+
+**6.**
+Here we create a data set named state.level on the basis of education.state, and added a new feature called state_level which is the highesst education degree level in the state. The first few rows are shown below.
+```{r 6, warning = FALSE}
+education.state_names = colnames(education.state)
+state.level = mutate(education.state, state_level = education.state_names[apply(education.state, 1, which.max)])
+head(state.level)
+```
+
+### Visualization
+Visualization is crucial for gaining insight and intuition during data mining. We will map our data onto maps. Below is a map of the US that's colored by state.
+```{r map}
+states <- map_data("state")
+
+ggplot(data = states) + 
+  geom_polygon(aes(x = long, y = lat, fill = region, group = group),
+               color = "white") + 
+  coord_fixed(1.3) +
+  guides(fill=FALSE)  # color legend is unnecessary for this example and takes too long
+```
+
+**7.**
+Here we combine the states variable and state.level we created earlier using left_join() and recolor the map based on the highest education level for each state.
+```{r 7}
+lower_state.name = unlist(lapply(list(state.name), tolower))
+states$region = state.abb[match(states$region, lower_state.name)]
+states = left_join(states, state.level, by = c("region" = "State"))
+ggplot(data = states) + 
+  geom_polygon(aes(x = long, y = lat, fill = state_level, group = group),
+               color = "white") + 
+  coord_fixed(1.3)
+```
+
+**8.**
+```{r 8}
+ggplot(census, aes(x = Unemployment, y = Poverty,  size = TotalPop)) +
+  geom_point() +
+  scale_x_log10() +
+  facet_wrap(~ State)
+  labs(title = "Poverty and Unemployment in the United States", 
+       subtitle = "2017 1-year ACS estimates", 
+       y = "Poverty", 
+       x = "Unemployement")
+```
+
+**9.**
+
+Below is a cleaned up dataset called census.clean that filtered out any missing values, converted Men, Employed, and VotingAgeCitizen to percentages and Computed the Minority attribute by combining Hispanic, Black, Native, Asian and Pacific (these variables were then dropped along with Walk, PublicWork, Construction and Unemployment).
+```{r 9}
+census.clean <- census %>%
+  drop_na() %>%
+  mutate(Men = Men/TotalPop * 100, Employed = Employed/TotalPop * 100, VotingAgeCitizen = VotingAgeCitizen/TotalPop * 100, Minority = Hispanic + Black + Native + Asian + Pacific) %>%
+  select(-`Hispanic`,
+         -`Black`,
+         -`Native`,
+         -`Asian`,
+         -`Pacific`,
+         -`Walk`,
+         -`PublicWork`,
+         -`Construction`,
+         -`Unemployment`)
+```
+
+**10.**
+
+First few rows of census.clean:
+```{r 10}
+head(census.clean)
+```
+
+### Dimensionality Reduction
+
+**11. **
+
+Here we ran PCA for census.clean (excluding the State and County columns)
+```{r 11}
+pr.out = prcomp(census.clean[,-c(1, 2)], scale = TRUE, center = TRUE)
+pr.var = pr.out$sdev^2
+pve = pr.var/sum(pr.var)
+pc.county = pr.out$rotation[,c(1,2)]
+print("First two principle components:")
+pc.county
+pc1.ordered = sort(abs(pc.county[, 1]), decreasing = TRUE)
+print("The three features with the largest absolute values of the first principal component:")
+head(pc1.ordered, 3)
+```
+I chose to center and scale the features before running the PCA in order to center the variables around a mean of 0 and give them a standard deviation and variance of 1. This is to ensure that PC's won't be driven by the variable that has the largest mean and variance. The three features with the largest absolute values of the first principal component are WorkAtHome, SelfEmployed, and Minority. The features that have opposite signs are TotalPop, Women, White, VotingAgeCitizen, Poverty, Service, Office, Carpool, Transit, and Minority which doesnt mean much as signs don't have influence on the weight of each variable.
+
+**12. **
+
+Below we found the minimum number of PCs needed to capture 90% of the variance for the analysis. We also plotted the proportion of variance explained and cummulative PVE
+```{r 12}
+num = which(cumsum(pve) >= 0.9)[1]
+num
+plot(pve, xlab = "Principal Component", 
+     ylab = "Proportion of Variance Explained", ylim = c(0, 1), type = 'b')
+plot(cumsum(pve), xlab = "Principal Component", 
+     ylab = "Cumulative Proportion of Variance Explained", ylim = c(0, 1), type = 'b')
+```
+We need a minimum of 12 PCs to capture 90% of the variance for the analysis.
+
+### Clustering
+
+**13. **
+
+Below we ran hierarchical clustering with complete linkage on census.clean.
+```{r 13}
+census.dist = dist(census.clean[,-c(1, 2)], method = "euclidean")
+census.hclust = hclust(census.dist, method = "complete")
+plot(census.hclust)
+clus = cutree(census.hclust, 10)
+county.dist = dist(pc.county, method = "euclidean")
+county.hclust = hclust(county.dist, method = "complete")
+plot(county.hclust)
+table(clus)
+census.hclust
+county.hclust
+# test_color <- rainbow(2)
+# test_plot_color <- test_color[census.clean$County == "Santa Barbara County"]
+# test_census_dend = as.dendrogram(census.hclust)
+# test_census_dend = set(test_census_dend, "labels_cex", 0.1)
+# test_census_dend = set_labels(test_census_dend, labels=census.clean$County[order.dendrogram(test_census_dend)])
+# plot(test_census_dend, horiz = T)
+
+```
+We can see from the first cluster dendrogram that there are way too many observations, however there are what appears to be separated clusters. In the second dendrogram, our observations are shrunken alot due to the reduction from PCA and again the clusters are separated and legible.
+
+### Modeling
+
+We start considering supervised learning tasks now. The most interesting/important question to ask is: can we use census information as well as the education information in a county to predict the level of poverty in that county?
+
+For simplicity, we are interested in a binary classification problem. Specifically, we will transform Poverty into a binary categorical variable: high and low, and conduct its classification.
+
+```{r}
+all <- census.clean %>%
+  left_join(education, by = c("State"="State", "County"="County")) %>% 
+  na.omit
+```
+
+**14.**
+
+Here we transformed the variable Poverty into a binary categorical variable with two levels:1 if Poverty is greater than 20, and 0 if Poverty is smaller than or equal to 20. We also removed features that we thought were uninformative in classification tasks which were TotalPop, MeanCommute, total_pop, State, and County.
+```{r 14}
+all <- all %>%
+  mutate(Poverty = ifelse(Poverty > 20, 1, 0)) %>%
+  select(-`TotalPop`,
+         -`MeanCommute`,
+         -`total_pop`,
+         -`State`,
+         -`County`) %>%
+  rename(`LessThanAHighSchoolDiploma` = `Less than a high school diploma, 2015-19`, `HighSchoolDiplomaOnly` = `High school diploma only, 2015-19`, `SomeCollegeOrAssociatesDegree` = `Some college or associate's degree, 2015-19`, `BachelorsDegreeOrHigher` = `Bachelor's degree or higher, 2015-19`)
+```
+
+```{r}
+set.seed(123) 
+n <- nrow(all)
+idx.tr <- sample.int(n, 0.8*n) 
+all.tr <- all[idx.tr, ]
+all.te <- all[-idx.tr, ]
+```
+
+```{r}
+set.seed(123) 
+nfold <- 10
+folds <- sample(cut(1:nrow(all.tr), breaks=nfold, labels=FALSE))
+```
+
+```{r}
+calc_error_rate = function(predicted.value, true.value){
+  return(mean(true.value!=predicted.value))
+}
+records = matrix(NA, nrow=3, ncol=2)
+colnames(records) = c("train.error","test.error")
+rownames(records) = c("tree","logistic","lasso")
+```
+
+**15.**
+
+Below we trained a decision tree and pruned it to minimize the misclassifcation error.
+```{r 15}
+set.seed(123)
+tree.poverty = tree(as.factor(Poverty)~., data = all.tr)
+summary(tree.poverty)
+plot(tree.poverty)
+text(tree.poverty, pretty = 0, cex = .4, col = "red")
+cv = cv.tree(tree.poverty, FUN = prune.misclass, K = folds)
+best.cv = min(cv$size[cv$dev == min(cv$dev)])
+best.cv
+best_size = min(cv$size[cv$dev == min(cv$dev)])
+pt.cv = prune.misclass(tree.poverty, best=best_size)
+plot(pt.cv)
+text(pt.cv, pretty=0, col = "blue", cex = .5)
+pred.pt.cv.te = predict(pt.cv, all.te, type = "class")
+pred.pt.cv.tr = predict(pt.cv, all.tr, type = "class")
+error.te = calc_error_rate(pred.pt.cv.te, all.te$Poverty)
+error.te
+error.tr = calc_error_rate(pred.pt.cv.tr, all.tr$Poverty)
+error.tr
+records[1,1] <- error.tr
+records[1,2] <- error.te
+records
+```
+The plots shown above show the tree before and after pruning. Training and test errors for the tree can be seen by the output of records. Looking at this tree, we can see that employed is the initial factor to determining poverty, then race (whether you're white or not), then mode of transportation, it seems that Men and Self Employed made it on the tree, however it doesn't seem to be feasibly important towards determining poverty.
+**16.**
+
+Below
+```{r 16}
+glm.fit = glm(Poverty~., data = all, family = binomial)
+summary(glm.fit)
+prob.glm.tr = predict(glm.fit, all.tr, type = "response")
+prob.glm.te = predict(glm.fit, all.te, type = "response")
+glm.error.tr = calc_error_rate(prob.glm.tr, all.tr)
+glm.error.te = calc_error_rate(prob.glm.tr, all.te)
+records[2,1] <- glm.error.tr
+records[2,2] <- glm.error.te
+records
+```
+
+**17.**
+ Below we did logistic regression with lasso penalty on the data.
+```{r 17}
+set.seed(123)
+lambda = seq(1, 20) * 1e-5
+x = model.matrix(Poverty~., all.tr)
+y = all.tr$Poverty
+lasso_mod = glmnet(x, y, alpha = 1, lambda = lambda)
+cv.out.lasso = cv.glmnet(x, y, alpha = 1)
+bestlam = cv.out.lasso$lambda.min
+bestlam
+coef(lasso_mod, bestlam)
+newX = model.matrix(~.-Poverty, all.tr)
+newX2 = model.matrix(~.-Poverty, all.te)
+lasso.pred.train = predict(lasso_mod, s = bestlam, newx = newX)
+lasso.pred.test = predict(lasso_mod, s = bestlam, newx = newX2)
+lasso.error.tr = calc_error_rate(lasso.pred.train, all.tr)
+lasso.error.te = calc_error_rate(lasso.pred.test, all.te)
+records[3,1] <- lasso.error.tr
+records[3,2] <- lasso.error.te
+records
+
+```
+The optimal value of lambda is 2.159097e-05.
+
+**18.**
+
+Below are the different ROC curves for the logit regression and LASSoO logit regression.
+```{r 18}
+# pred_tree = prediction(pred.pt.cv.te, all.te$Poverty)
+# perf_tree = performance(pred_tree, measure = "tpr", x.measure = "fpr")
+# plot(perf_tree, col = 2, lwd = 3, main = "Tree ROC Curve")
+# abline(0,1)
+pred_glm = prediction(prob.glm.te, all.te$Poverty)
+perf_glm = performance(pred_glm, measure = "tpr", x.measure = "fpr")
+plot(perf_glm, col = 2, lwd = 3, main = "Logit Reg ROC Curve")
+abline(0,1)
+pred_lasso = prediction(lasso.pred.test, all.te$Poverty)
+perf_lasso = performance(pred_lasso, measure = "tpr", x.measure = "fpr")
+plot(perf_lasso, col = 2, lwd = 3, main = "Lasso ROC Curve")
+abline(0, 1)
+```
+
+**20.**
+
+```{r}
+all <- census.clean %>%
+  left_join(education, by = c("State"="State", "County"="County")) %>% 
+  na.omit
+all = all %>% select(-c("TotalPop","White", "Less than a high school diploma, 2015-19", "High school diploma only, 2015-19", "Some college or associate's degree, 2015-19", "Bachelor's degree or higher, 2015-19","VotingAgeCitizen"))
+all
+
+linearReg = lm(Poverty~County, data = all)
+
+
+plot(linearReg, pch = 16, col = "red")
+```
+

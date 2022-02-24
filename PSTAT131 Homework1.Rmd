@@ -1,0 +1,105 @@
+---
+title: "PSTAT 131 Homework 1"
+author: "Gabriel Fei and Tim Flood"
+date: "10/12/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+Reading Data:
+```{r loadingdata, echo = TRUE}
+library(dplyr)
+library(readr)
+library(ggplot2)
+algae <- read_table("algaeBloom.txt", col_names =
+                       c('season', 'size', 'speed', 'mxPH', 'mnO2', 'Cl', 'NO3', 'NH4',
+                         'oPO4', 'PO4', 'Chla', 'a1', 'a2', 'a3', 'a4', 'a5', 'a6', 'a7'),
+                     na = "XXXXXXX")
+glimpse(algae)
+```
+1.\textbf{Descriptive summary statistics} \
+\textbf{a)}
+```{r 1a, echo = TRUE}
+algae %>%
+  group_by(size) %>%
+  summarise(n = n())
+```
+There are 71 small observations, 84 medium observations and 45 large observations. \
+\textbf{b)}
+```{r missingval, echo = TRUE}
+print("Are there any missing values?")
+any(is.na(algae))
+print("Mean of each chemical:")
+colMeans(algae[, 6:11], na.rm = TRUE)
+print("Variance of each chemical:")
+sapply(algae[, 6:11], var, na.rm = TRUE)
+```
+The magnitude of the variance is a lot bigger than the magnitude of the mean. The magnitude of the variance seems to vary in size in proportion to the size of the mean. A higher mean (though it might not actually imply) seems to yield a higher variance. \
+\textbf{c)}
+```{r MADmedian, echo = TRUE}
+print("Median of each chemical: ")
+sapply(algae[, 6:11], median, na.rm = TRUE)
+print("MAD of each chemical: ")
+sapply(algae[, 6:11], mad, na.rm = TRUE)
+```
+The two quantities (median and MAD) seem to be relatively close in value, the most different being NH4. Looking at the two sets of quantities (median and MAD & mean and var) side by side, comparing mean and median, the mean values (especially for the chemicals NH4, oPO4, and Chla) are bigger than the median values, suggesting that there could be some outliers in our data.\
+
+2. \textbf{Data visualization} \
+\textbf{a)}
+```{r histogram, echo = TRUE}
+ggplot(algae, aes(x = mnO2)) + geom_histogram(aes(y = stat(density)), bins = 35, na.rm = TRUE) + ggtitle("Histogram of mnO2")
+```
+Yes, the distribution is skewed left. \
+\textbf{b)} \
+```{r histogram2, echo = TRUE}
+ggplot(algae, aes(x = mnO2)) + geom_histogram(aes(y = stat(density)), bins = 35, na.rm = TRUE) + geom_density(lwd = 2, col = 'red') + geom_rug() + ggtitle("Histogram of mnO2")
+```
+\textbf{c)}
+```{r boxplot, echo = TRUE}
+algae %>%
+  group_by(speed) %>%
+  ggplot(aes(x = a3)) + geom_boxplot(na.rm = TRUE) + ggtitle("A conditioned Boxplot of Algal a_3")
+```
+We can see that there's many outliers in our a_3 data, and since more than 25% of the data is value 0, the left side of the box is going to sit at 0. Our boxplot is right skewed as the majority of our points are on the left below 10. \
+
+3. \textbf{Dealing with missing values} \
+\textbf{a)} 
+```{r missingvals, echo = TRUE}
+mis <- is.na(algae)
+sum(mis)
+summary(algae) 
+```
+We have 33 missing values. There's 1 missing value in mxPH, 2 in mnO2, 10 in Cl, 2 in NO3, 2 in NH4, 2 in oPO4, 2 in PO4, and 12 in Chla. \
+
+\textbf{b)}
+```{r remmis, echo = TRUE}
+algae.del <- filter(algae, complete.cases(algae))
+algae.del
+```
+There are 184 observations in algae.del. \
+
+4. \
+\textbf{a)} Var($\hat{f}(x_{0})$) and $[Bias(\hat{f}(x_0))]^2$ represent the reducible error in the bias-variance tradeoff. Var($\epsilon$) represents the irreducible error in the bias-variance tradeoff. \
+
+\textbf{b)}
+$$
+\begin{aligned}
+E[(y_0 - \hat{f}(x_0))^2] &= Var(\hat{f}(x_0)) + [Bias(\hat{f}(x_0))]^2 + Var(\epsilon)\\
+&= E[(\hat{f}(x_0) - E[\hat{f}(x_0)])^2] + [E[\hat{f}(x_0)] - f(x_0)]^2 + Var(\epsilon)
+\end{aligned}
+$$
+If we take:
+$$
+\hat{f}(x_0) = E[Y|X = x_0]
+$$
+which is the best f we can get (though unknown in practice) then:
+$$
+E[(\hat{f}(x_0) - E[\hat{f}(x_0)])^2] = 0 \ \text{and} \ [E[\hat{f}(x_0)] - f(x_0)]^2 = 0
+$$
+which minimizes the 1st equation and we get left with:
+$$
+Var(\epsilon)
+$$
+Therefore, the expected test error is always at least as large as the irreducible error.
